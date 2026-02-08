@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GitHub 灵感探索器</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🔍</text></svg>">
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+        .glass { background: rgba(255, 255, 255, 0.8); backdrop-filter: blur(12px); }
+        .card-hover { transition: all 0.3s ease; }
+        .card-hover:hover { transform: translateY(-2px); box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.1); }
+    </style>
+    <meta name="robots" content="index,follow">
+</head>
+<body class="bg-gray-50 min-h-screen flex flex-col items-center justify-center p-6 text-gray-800">
+    <div id="app" class="w-full max-w-2xl">
+        <div class="text-center mb-12">
+            <h1 class="text-4xl font-bold mb-2 tracking-tight">GitHub 灵感探索器</h1>
+            <p class="text-gray-500">发现最热门的开源项目</p>
+        </div>
+        <div class="relative mb-12">
+            <input 
+                v-model="keyword" 
+                @keyup.enter="search"
+                type="text" 
+                placeholder="输入关键词（例如 'AI'）..." 
+                class="w-full px-6 py-4 text-lg rounded-2xl border-none shadow-lg glass focus:ring-2 focus:ring-blue-500 focus:outline-none transition-shadow"
+            >
+            <button 
+                @click="search"
+                class="absolute right-3 top-3 bg-black text-white px-4 py-2 rounded-xl hover:bg-gray-800 transition-colors font-medium"
+            >
+                搜索
+            </button>
+        </div>
+        <div v-if="loading" class="text-center py-10">
+            <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-gray-900 mx-auto"></div>
+        </div>
+        <div v-else class="space-y-4">
+            <div v-for="repo in repos" :key="repo.id" class="bg-white p-6 rounded-2xl shadow-sm border border-gray-100 card-hover flex flex-col">
+                <div class="flex justify-between items-start mb-2">
+                    <a :href="repo.html_url" target="_blank" class="text-xl font-semibold hover:text-blue-600 transition-colors">{{ repo.name }}</a>
+                    <div class="flex items-center space-x-1 text-yellow-500 font-medium">
+                        <svg class="w-5 h-5 fill-current" viewBox="0 0 24 24"><path d="M12 17.27L18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/></svg>
+                        <span>{{ formatStars(repo.stargazers_count) }}</span>
+                    </div>
+                </div>
+                <p class="text-gray-600 leading-relaxed text-sm mb-3">{{ repo.description || '暂无描述' }}</p>
+                <div class="mt-auto flex items-center text-xs text-gray-400 space-x-4">
+                    <span v-if="repo.language" class="flex items-center">
+                        <span class="w-2 h-2 rounded-full bg-blue-500 mr-2"></span>{{ repo.language }}
+                    </span>
+                    <span>更新于 {{ new Date(repo.updated_at).toLocaleDateString('zh-CN') }}</span>
+                </div>
+            </div>
+            <div v-if="searched && repos.length === 0" class="text-center text-gray-500 py-8">
+                未找到相关项目
+            </div>
+        </div>
+    </div>
+    <script>
+        const { createApp, ref } = Vue;
+        createApp({
+            setup() {
+                const keyword = ref('');
+                const repos = ref([]);
+                const loading = ref(false);
+                const searched = ref(false);
+                const formatStars = (count) => count >= 1000 ? (count / 1000).toFixed(1) + 'k' : count;
+                const search = async () => {
+                    if (!keyword.value.trim()) return;
+                    loading.value = true; searched.value = true; repos.value = [];
+                    try {
+                        const q = encodeURIComponent(keyword.value);
+                        const url = `https://api.github.com/search/repositories?q=${q}&sort=stars&order=desc&per_page=5`;
+                        const res = await fetch(url, { headers: { 'User-Agent': 'GitHub Explorer' } });
+                        const data = await res.json();
+                        if (data.items) repos.value = data.items;
+                        else alert('搜索失败，可能是 API 频率限制。');
+                    } catch (e) {
+                        alert('网络错误');
+                    } finally {
+                        loading.value = false;
+                    }
+                };
+                return { keyword, repos, loading, searched, search, formatStars };
+            }
+        }).mount('#app');
+    </script>
+</body>
+</html>

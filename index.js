@@ -1,5 +1,6 @@
 const https = require('https');
 const SINGLE_RUN = process.env.SINGLE_RUN === '1' || process.env.SINGLE_RUN === 'true';
+const WEEKLY_REPORT = process.env.WEEKLY_REPORT === '1' || process.env.WEEKLY_REPORT === 'true';
 let schedule = null;
 if (!SINGLE_RUN) {
     schedule = require('node-schedule');
@@ -83,6 +84,51 @@ async function queryByKeyword(keyword, qualifier, dateStr, perPage = 10) {
     return data.items || [];
 }
 
+async function fetchRecentStars(repoFullName, days = 3, pageLimit = 2) {
+    const since = new Date();
+    since.setDate(since.getDate() - days);
+    const headers = {
+        'User-Agent': 'Node.js Monitor Script',
+        'Accept': 'application/vnd.github.v3.star+json'
+    };
+    if (process.env.GITHUB_TOKEN) headers['Authorization'] = `token ${process.env.GITHUB_TOKEN}`;
+    let count = 0;
+    for (let page = 1; page <= pageLimit; page++) {
+        const url = `https://api.github.com/repos/${repoFullName}/stargazers?per_page=100&page=${page}`;
+        const items = await request(url, { headers });
+        if (!Array.isArray(items) || items.length === 0) break;
+        for (const s of items) {
+            if (!s || !s.starred_at) continue;
+            const t = new Date(s.starred_at);
+            if (t >= since) count++;
+        }
+        if (items.length < 100) break;
+    }
+    return count;
+}
+
+async function aiSummarize(topic, repos) {
+    if (!process.env.OPENAI_API_KEY) return `本周「${topic}」：以 Star 增长与活跃度为主的热门迭代，建议关注可落地的工作流、模型接口封装与工具链协同。`;
+    const base = process.env.OPENAI_BASE || 'https://api.openai.com/v1/chat/completions';
+    const headers = {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`
+    };
+    const names = repos.map(r => `${r.full_name}⭐+${r.recentStars||0}`).join('；');
+    const prompt = `请用中文面向产品与技术管理者，简洁总结本周「${topic}」领域的热门趋势：列出的项目为：${names}。按以下维度给出结论：1) 是否出现技术跃迁或仅迭代；2) 优缺点与适用场景；3) 可能影响的生态或落地方向。要求精炼，不要空话。`;
+    const body = {
+        model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
+        messages: [
+            { role: 'system', content: '你是资深技术分析师，用简洁中文输出结论。' },
+            { role: 'user', content: prompt }
+        ],
+        temperature: 0.3
+    };
+    const data = await request(base, { method: 'POST', headers }, body);
+    const txt = data && data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content;
+    return txt || `本周「${topic}」：以 Star 增长与活跃度为主的热门迭代。`;
+}
+
 // 搜索特定分类（近3天活跃热门，保证Top3）
 async function searchCategory(categoryName, keywords) {
     console.log(`🔍 [${categoryName}] 搜索中...`);
@@ -118,6 +164,56 @@ async function searchCategory(categoryName, keywords) {
     top = uniqSortTop(top.concat(collected), TOP_N);
     console.log(`   - 兜底取前 ${top.length}`);
     return top;
+}
+
+async function buildWeeklyData() {
+    const dateStr = getDateStr(7);
+    const results = {};
+    for (const [name, keywords] of Object.entries(CATEGORIES)) {
+        let collected = [];
+        for (const kw of keywords) {
+            await new Promise(r => setTimeout(r, 300));
+            const items = await queryByKeyword(kw, 'pushed', dateStr, 10);
+            collected = collected.concat(items);
+        }
+        let top = uniqSortTop(collected, 8);
+        for (const r of top) {
+            const full = r.full_name || `${r.owner?.login}/${r.name}`;
+            r.recentStars = await fetchRecentStars(full, 3, process.env.GITHUB_TOKEN ? 3 : 1);
+        }
+        top.sort((a, b) => (b.recentStars || 0) - (a.recentStars || 0));
+        results[name] = top.slice(0, TOP_N);
+    }
+    return results;
+}
+
+async function sendWeeklyReport(results) {
+    const elements = [];
+    elements.push({
+        tag: "div",
+        text: { tag: "lark_md", content: `📅 周报：近3天新增 Star 排序 (Top ${TOP_N}/Category)\n(Safe Keyword: github)` }
+    });
+    elements.push({ tag: "hr" });
+    for (const [category, repos] of Object.entries(results)) {
+        const summary = await aiSummarize(category, repos);
+        elements.push({ tag: "div", text: { tag: "lark_md", content: `### 📂 ${category}` } });
+        for (const repo of repos) {
+            const desc = repo.description ? repo.description.slice(0, 80).replace(/\n/g, ' ') + (repo.description.length > 80 ? '...' : '') : '暂无描述';
+            elements.push({
+                tag: "div",
+                text: { tag: "lark_md", content: `⭐+${repo.recentStars||0} • [${repo.name}](${repo.html_url})\n⭐ ${repo.stargazers_count} | 🗣 ${repo.language || 'Unknown'}\n${desc}` }
+            });
+        }
+        elements.push({ tag: "div", text: { tag: "lark_md", content: `🧠 AI解析：${summary}` } });
+        elements.push({ tag: "hr" });
+    }
+    elements.push({ tag: "note", elements: [{ tag: "plain_text", content: "自动化情报系统 • GitHub Monitor" }] });
+    const cardContent = {
+        config: { wide_screen_mode: true },
+        header: { template: "purple", title: { content: "📈 GitHub 领域周报（含AI解析）", tag: "plain_text" } },
+        elements
+    };
+    await sendCard(cardContent);
 }
 
 // 发送“无更新”通知
@@ -261,16 +357,22 @@ async function runTask() {
 
 // --- 调度入口 ---
 if (SINGLE_RUN) {
-    runTask().then(() => process.exit(0));
+    if (WEEKLY_REPORT) {
+        buildWeeklyData().then(sendWeeklyReport).then(() => process.exit(0));
+    } else {
+        runTask().then(() => process.exit(0));
+    }
 } else {
     runTask();
     const rule = new schedule.RecurrenceRule();
     rule.dayOfWeek = [3, 6];
     rule.hour = 9;
     rule.minute = 30;
-    const job = schedule.scheduleJob(rule, function(){
-        console.log('🔔 定时任务触发！');
-        runTask();
-    });
-    console.log('⏳ 定时服务已启动: 每周三、周六 09:30 推送。按 Ctrl+C 停止。');
+    schedule.scheduleJob(rule, function(){ console.log('🔔 定时任务触发！'); runTask(); });
+    const weekly = new schedule.RecurrenceRule();
+    weekly.dayOfWeek = 0;
+    weekly.hour = 10;
+    weekly.minute = 0;
+    schedule.scheduleJob(weekly, function(){ console.log('🔔 周报任务触发！'); buildWeeklyData().then(sendWeeklyReport); });
+    console.log('⏳ 定时服务已启动: 每周三/六 09:30 与周日 10:00 推送。按 Ctrl+C 停止。');
 }
